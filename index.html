@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>人脸识别</title>
+  <style>
+    body { margin: 0; background: #000; color: white; font-family: sans-serif; }
+    #video { width: 100%; height: auto; display: block; }
+    canvas { position: absolute; top: 0; left: 0; }
+    .container { position: relative; }
+    .info { position: fixed; bottom: 30px; left: 20px; right: 20px; 
+            background: rgba(0,0,0,0.7); border-radius: 15px; padding: 20px; z-index: 10; }
+    button { padding: 10px 20px; margin: 5px; font-size: 16px; border-radius: 8px; border: none; background: #07C160; color: white; }
+    .reg-area { background: rgba(0,0,0,0.7); padding: 15px; margin: 10px; border-radius: 10px; }
+    input { margin: 5px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+  
+  <!-- 显示结果 -->
+  <div class="info" id="result">
+    <div>👥 检测到 <span id="count">0</span> 人</div>
+    <div id="names"></div>
+  </div>
+
+  <!-- 注册区域 -->
+  <div class="reg-area">
+    <h4>📌 注册人脸</h4>
+    <input type="text" id="nameInput" placeholder="输入姓名" />
+    <input type="file" id="imageInput" accept="image/*" />
+    <button onclick="registerFace()">注册这张脸</button>
+    <p><small>已注册：<span id="regList"></span></small></p>
+    <button onclick="clearAll()">清空所有注册</button>
+  </div>
+
+  <!-- 引入 face-api.js -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+  <script>
+    // ========== 1. 全局变量 ==========
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    // 存储已注册的人脸描述符和对应姓名
+    let labeledDescriptors = [];
+
+    // ========== 2. 加载模型 ==========
+    async function loadModels() {
+      // 模型放在同目录的 models 文件夹下
+      const MODEL_URL = './models';
+      await faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL);
+      await faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL);
+      console.log('模型加载完成');
+    }
+
+    // ========== 3. 打开摄像头 ==========
+    async function startVideo() {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: 'user' } // 前摄像头，改成'environment'用后摄
+      });
+      video.srcObject = stream;
+      // 等视频元数据加载完
+      return new Promise((resolve) => {
+        video.onloadedmetadata = () => {
+          resolve(video);
+        };
+      });
+    }
+
+    // ========== 4. 注册人脸 ==========
+    async function registerFace() {
+      const name = document.getElementById('nameInput').value.trim();
+      const fileInput = document.getElementById('imageInput');
+      if (!name || !fileInput.files[0]) {
+        alert('请填写姓名并选择一张正脸照片');
+        return;
+      }
+
+      // 读取图片文件
+      const img = await faceapi.bufferToImage(fileInput.files[0]);
+      
+      // 检测人脸并提取特征
+      const detection = await faceapi.detectSingleFace(img, 
+        new faceapi.TinyFaceDetectorOptions())
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+      
+      if (!detection) {
+        alert('未检测到人脸，请用清晰正面照');
+        return;
+      }
+
+      // 存储描述符和姓名
+      labeledDescriptors.push(
+        new faceapi.LabeledFaceDescriptors(name, [detection.descriptor])
+      );
+
+      updateRegList();
+      document.getElementById('nameInput').value = '';
+      document.getElementById('imageInput').value = '';
+      alert(`${name} 注册成功！`);
+    }
+
+    // 更新已注册列表显示
+    function updateRegList() {
+      document.getElementById('regList').innerText = 
+        labeledDescriptors.map(d => d.label).join(', ') || '无';
+    }
+
+    // 清空所有注册
+    function clearAll() {
+      labeledDescriptors = [];
+      updateRegList();
+    }
+
+    // ========== 5. 实时识别 ==========
+    async function detect() {
+      if (!video || video.readyState !== 4) {
+        requestAnimationFrame(detect);
+        return;
+      }
+
+      // 调整 canvas 尺寸匹配视频
+      const displaySize = { width: video.videoWidth, height: video.videoHeight };
+      faceapi.matchDimensions(canvas, displaySize);
+
+      // 检测人脸
+      const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 });
+      const detections = await faceapi.detectAllFaces(video, options)
+        .withFaceLandmarks()
+        .withFaceDescriptors();
+
+      // 如果没人注册，就只显示框和人数
+      const resizedDetections = faceapi.resizeResults(detections, displaySize);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      faceapi.draw.drawDetections(canvas, resizedDetections);
+
+      // 统计人数
+      document.getElementById('count').innerText = detections.length;
+
+      // 识别
+      const namesDiv = document.getElementById('names');
+      if (labeledDescriptors.length === 0) {
+        namesDiv.innerHTML = '<span style="color:#aaa">（尚未注册任何人脸）</span>';
+        requestAnimationFrame(detect);
+        return;
+      }
+
+      // 创建人脸匹配器
+      const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, 0.6); // 阈值 0.6
+
+      const names = [];
+      for (let i = 0; i < detections.length; i++) {
+        const bestMatch = faceMatcher.findBestMatch(detections[i].descriptor);
+        names.push(bestMatch.toString()); // 例如 "张三 (0.72)"
+      }
+      namesDiv.innerHTML = names.map((n, i) => `第${i+1}人：${n}`).join('<br>');
+
+      requestAnimationFrame(detect);
+    }
+
+    // ========== 6. 主流程 ==========
+    async function main() {
+      try {
+        await loadModels();
+        await startVideo();
+        updateRegList();
+        detect(); // 开始循环检测
+      } catch (err) {
+        alert('初始化失败：' + err.message);
+        console.error(err);
+      }
+    }
+
+    // 点击按钮注册时调用全局函数
+    window.registerFace = registerFace;
+    window.clearAll = clearAll;
+    
+    main();
+  </script>
+</body>
+</html>
